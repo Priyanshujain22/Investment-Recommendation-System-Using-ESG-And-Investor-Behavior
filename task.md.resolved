@@ -1,0 +1,23 @@
+# Model 1 Implementation Plan
+
+- [ ] 1. **Data Preprocessing & Feature Engineering**
+  - [ ] Calculate `avg_return` (annualized or average daily return) from daily price data.
+  - [ ] Calculate `volatility` (standard deviation of daily returns) from daily price data.
+  - [ ] Calculate `momentum_6m` (6-month return) from daily price data.
+  - [ ] Merge these calculated market features with the ESG dataset ([Model1_sp500_esg_data.csv](file:///f:/ML_PROJECT/Dataset/Model1_sp500_esg_data.csv)) using the stock `Symbol`.
+  - [ ] Handle missing values (e.g., imputation or dropping).
+  - [ ] Encode categorical variables like `GICS Sector` using One-Hot Encoding.
+  - [ ] Scale numerical features (e.g., using StandardScaler).
+
+- [ ] 2. **Target Variable Definition**
+  - [ ] Define what Model 1 will predict. Suggest calculating the **Sharpe Ratio** (Risk-adjusted return) for each stock and using it as the target variable for regression, OR classifying stocks into "High Performers" vs "Low Performers".
+
+- [ ] 3. **Model Selection & Training**
+  - [ ] Perform Train-Test Split (e.g., 80% train, 20% test).
+  - [ ] Train models (e.g., Linear Regression, Random Forest Regressor, Gradient Boosting).
+  - [ ] Perform Hyperparameter tuning using GridSearchCV/RandomizedSearchCV.
+
+- [ ] 4. **Evaluation & Interpretation**
+  - [ ] Evaluate model performance using metrics like RMSE, MAE, and R-squared.
+  - [ ] Extract feature importances to see how much E, S, and G scores contribute to the predictions.
+  - [ ] Generate the final ESG-aware stock performance score / ranking for recommendations.
