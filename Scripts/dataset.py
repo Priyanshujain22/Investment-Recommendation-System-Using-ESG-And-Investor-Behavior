@@ -109,25 +109,41 @@ print(df.isnull().sum())
 # ============================================================
 # STEP 5: Create Target Variable (risk_class)
 # ============================================================
+# ============================================================
+# STEP 5: Create Target Variable (risk_class) using ESG + Volatility
+# ============================================================
 
-# We use volatility to define how risky a company is
-# Split into 3 equal groups using percentiles (33% each)
-#
-# Bottom 33%  → Low Risk    (stable, less price movement)
-# Middle 33%  → Medium Risk (moderate)
-# Top 33%     → High Risk   (very jumpy, unpredictable)
+from sklearn.preprocessing import MinMaxScaler
 
-df['risk_class'] = pd.qcut(
-    df['volatility'],       # column to bin
-    q=3,                    # 3 equal groups
-    labels=['Low', 'Medium', 'High']  # label each group
+# --- Normalize volatility and ESG ---
+scaler_mm = MinMaxScaler()
+
+df[['volatility_norm', 'totalEsg_norm']] = scaler_mm.fit_transform(
+    df[['volatility', 'totalEsg']]
 )
 
+# --- Create composite risk score ---
+# Higher volatility → higher risk
+# Higher ESG → lower risk
+df['risk_score'] = (
+    0.7 * df['volatility_norm'] +
+    0.3 * (1 - df['totalEsg_norm'])
+)
+
+# --- Convert into risk classes ---
+df['risk_class'] = pd.qcut(
+    df['risk_score'],
+    q=3,
+    labels=['Low', 'Medium', 'High']
+)
+
+# --- Debug prints ---
 print("Risk class distribution:")
 print(df['risk_class'].value_counts())
 
-print("\nSample (volatility vs risk_class):")
-print(df[['Symbol', 'volatility', 'risk_class']].head(10))
+print("\nSample (risk_score vs risk_class):")
+print(df[['Symbol', 'risk_score', 'risk_class']].head(10))
+
 
 # ============================================================
 # STEP 6: Preprocessing
@@ -139,8 +155,16 @@ from sklearn.preprocessing import StandardScaler, LabelEncoder
 # Symbol → just a name, not a feature
 # volatility → we already used it to CREATE risk_class, 
 #              keeping it as input would be cheating (data leakage!)
-X = df.drop(columns=['Symbol', 'volatility', 'risk_class'])
-y = df['risk_class']
+X = df.drop(columns=[
+    'Symbol',
+    'volatility',
+    'risk_score',
+    'volatility_norm',
+    'totalEsg_norm',
+    'risk_class'
+])
+le = LabelEncoder()
+y = le.fit_transform(df['risk_class'])
 
 print("Features (X) shape:", X.shape)
 print("Target (y) shape:", y.shape)
@@ -170,10 +194,9 @@ print(X_scaled[0])
 from sklearn.model_selection import train_test_split
 
 # Split data into 80% training and 20% testing
-# random_state=42 → ensures same split every time you run
-# stratify=y → ensures each split has equal Low/Medium/High ratio
-X_train, X_test, y_train, y_test = train_test_split(
-    X_scaled, y,
+indices = np.arange(len(df))
+X_train, X_test, y_train, y_test, idx_train, idx_test = train_test_split(
+    X_scaled, y, indices,
     test_size=0.2,
     random_state=42,
     stratify=y
@@ -182,9 +205,9 @@ X_train, X_test, y_train, y_test = train_test_split(
 print("X_train shape:", X_train.shape)  # 80% of 426
 print("X_test shape:", X_test.shape)    # 20% of 426
 print("\nTraining class distribution:")
-print(y_train.value_counts())
+print(pd.Series(y_train).value_counts())
 print("\nTesting class distribution:")
-print(y_test.value_counts())
+print(pd.Series(y_test).value_counts())
 
 
 # ============================================================
@@ -195,6 +218,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 # --- Define all models in a dictionary ---
@@ -203,7 +228,20 @@ models = {
     'Logistic Regression' : LogisticRegression(max_iter=1000, random_state=42),
     'SVM'                 : SVC(random_state=42),
     'KNN'                 : KNeighborsClassifier(),
-    'Decision Tree'       : DecisionTreeClassifier(random_state=42)
+    'Decision Tree'       : DecisionTreeClassifier(random_state=42),
+    'Random Forest'       : RandomForestClassifier(
+        n_estimators=200,
+        max_depth=None,
+        random_state=42
+    ),
+    'XGBoost' : XGBClassifier(
+    n_estimators=200,
+    learning_rate=0.1,
+    max_depth=5,
+    random_state=42,
+    use_label_encoder=False,
+    eval_metric='mlogloss'
+    )
 }
 
 # --- Train and evaluate each model ---
@@ -249,17 +287,20 @@ print(results_df.to_string(index=False))
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
 
-# Get predictions from best model (Logistic Regression)
-best_model = models['Logistic Regression']
+# Get predictions from best model
+best_model_name = results_df.sort_values(by='F1 Score', ascending=False).iloc[0]['Model']
+best_model = models[best_model_name]
+
+print("Best model is: ",best_model_name)
 y_pred_best = best_model.predict(X_test)
 
 # --- Create Confusion Matrix ---
-cm = confusion_matrix(y_test, y_pred_best, labels=['Low', 'Medium', 'High'])
+cm = confusion_matrix(y_test, y_pred_best, labels = best_model.classes_)
 
 # --- Display it nicely ---
 disp = ConfusionMatrixDisplay(
     confusion_matrix=cm,
-    display_labels=['Low', 'Medium', 'High']
+    display_labels=best_model.classes_
 )
 
 fig, ax = plt.subplots(figsize=(6, 5))
@@ -276,9 +317,21 @@ print("Confusion Matrix saved ✅")
 print("\nConfusion Matrix (rows=Actual, cols=Predicted):")
 print(pd.DataFrame(
     cm,
-    index=['Actual Low', 'Actual Medium', 'Actual High'],
-    columns=['Pred Low', 'Pred Medium', 'Pred High']
+    index=[f'Actual {c}' for c in le.classes_],
+    columns=[f'Pred {c}' for c in le.classes_]
 ))
+
+
+importances = models['Decision Tree'].feature_importances_
+
+feature_importance_df = pd.DataFrame({
+    'Feature': X.columns,
+    'Importance': importances
+}).sort_values(by='Importance', ascending=False)
+
+print("\nTop Important Features:")
+print(feature_importance_df.head(10))
+
 
 # ============================================================
 # STEP 11: Save All Outputs to Excel
@@ -292,7 +345,7 @@ EXCEL_SAVE_PATH = os.path.join(BASE_DIR, 'model1_results.xlsx')
 # Get predictions for ALL data (not just test)
 # This way we can see risk class for every company
 X_all_scaled = scaler.transform(X)
-df['predicted_risk'] = best_model.predict(X_all_scaled)
+df['predicted_risk'] = le.inverse_transform(best_model.predict(X_all_scaled))
 
 # --- Prepare model comparison table ---
 results_df = pd.DataFrame(results)
@@ -300,8 +353,8 @@ results_df = pd.DataFrame(results)
 # --- Prepare confusion matrix as dataframe ---
 cm_df = pd.DataFrame(
     cm,
-    index  =['Actual Low', 'Actual Medium', 'Actual High'],
-    columns=['Pred Low',   'Pred Medium',   'Pred High']
+    index  =[f'Actual {c}' for c in le.classes_],
+    columns=[f'Pred {c}' for c in le.classes_]
 )
 
 # --- Write all sheets to one Excel file ---
@@ -321,13 +374,16 @@ with pd.ExcelWriter(EXCEL_SAVE_PATH, engine='openpyxl') as writer:
 
     # Sheet 5 → Test predictions (actual vs predicted)
     test_results = pd.DataFrame({
-        'Symbol'          : df.iloc[y_test.index]['Symbol'].values,
-        'Actual Risk'     : y_test.values,
-        'Predicted Risk'  : y_pred_best,
+        'Symbol'          : df.iloc[idx_test]['Symbol'].values,
+        'Actual Risk'     : le.inverse_transform(y_test),
+        'Predicted Risk'  : le.inverse_transform(y_pred_best),
         'Correct'         : ['✅' if a == p else '❌'
-                             for a, p in zip(y_test.values, y_pred_best)]
+                             for a, p in zip(y_test, y_pred_best)]
     })
     test_results.to_excel(writer, sheet_name='Test Predictions', index=False)
+
+    # Sheet 6 → Feature Importance (from Decision Tree)
+    feature_importance_df.to_excel(writer, sheet_name='Feature Importance', index=False)
 
 print("✅ Excel saved →", EXCEL_SAVE_PATH)
 print("\nSheets inside:")
@@ -336,3 +392,4 @@ print("  📄 Market Features   → avg_return, volatility, momentum_6m")
 print("  📄 Model Comparison  → accuracy, F1 of all 4 models")
 print("  📄 Confusion Matrix  → actual vs predicted breakdown")
 print("  📄 Test Predictions  → company wise correct/wrong prediction")
+print("  📄 Feature Importance → contribution of each feature to the model")
