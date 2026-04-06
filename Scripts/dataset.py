@@ -8,10 +8,10 @@ import numpy as np
 
 # Set path relative to current script (because of VS code error using OS)
 # 2. Load ESG dataset
-esg = pd.read_csv("sp500_esg_data.csv")
+esg = pd.read_csv("../Dataset/Model1_sp500_esg_data.csv")
 
 # 3. Load stock price dataset
-price = pd.read_csv("sp500_price_data.csv")
+price = pd.read_csv("../Dataset/Model1_sp500_price_data.csv")
 
 # Fix date column
 price['Date'] = pd.to_datetime(price['Date'], utc=True)
@@ -272,7 +272,7 @@ print(X_scaled[0])
 # --- STEP 6.4: Save Preprocessed Data to a single Excel file ---
 
 # 1. Define the path for the preprocessed data Excel file
-PREPROCESSED_DATA_PATH = r'C:\Users\mp2hl\Documents\ML Project\Model_1.O\Preprocessed_Data.xlsx'
+PREPROCESSED_DATA_PATH = r'F:\ML_PROJECT\results\Preprocessed_Data.xlsx'
 
 # 2. Use ExcelWriter to save multiple sheets
 with pd.ExcelWriter(PREPROCESSED_DATA_PATH, engine='openpyxl') as writer:
@@ -391,7 +391,7 @@ print(results_df.to_string(index=False))
 
 
 # ============================================================
-# STEP 9: Confusion Matrix (Best Model → Logistic Regression)
+# STEP 9: Confusion Matrix 
 # ============================================================
 
 import matplotlib.pyplot as plt
@@ -446,7 +446,7 @@ print(feature_importance_df.head(10))
 # ============================================================
 
 # Path to save excel
-EXCEL_SAVE_PATH = r'C:\Users\mp2hl\Documents\ML Project\Model_1.O\Final_Results.xlsx'
+EXCEL_SAVE_PATH = r'F:\ML_PROJECT\results\Final_Results.xlsx'
 
 # --- Prepare final dataset with predictions ---
 
