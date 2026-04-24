@@ -1,550 +1,344 @@
-# ============================================================
-# MODEL 1 - Company Risk Prediction (ESG + Market Data)
-# ============================================================
-
-# STEP 1: Import Libraries
+print("T1a")
 import pandas as pd
 import numpy as np
-
-# Set path relative to current script (because of VS code error using OS)
-# 2. Load ESG dataset
-esg = pd.read_csv("../Dataset/Model1_sp500_esg_data.csv")
-
-# 3. Load stock price dataset
-price = pd.read_csv("../Dataset/Model1_sp500_price_data.csv")
-
-# Fix date column
-price['Date'] = pd.to_datetime(price['Date'], utc=True)
-price=price.sort_values('Date').reset_index(drop=True)
-
-# Quick check
-
-print("ESG shape:", esg.shape)
-print("Price shape:", price.shape)
-print("\nESG columns:", esg.columns.tolist())
-print("\nPrice (first 3 rows, first 4 cols):")
-print(price.iloc[:3, :4])
-
-
-# ============================================================
-# STEP 2: Clean ESG Dataset
-# ============================================================
-
-esg.drop(columns=[
-    'Full Name',
-    'GICS Sub-Industry',
-    'percentile',
-    'ratingYear',
-    'ratingMonth',
-    'overallRisk'
-], inplace=True, errors='ignore')
-# errors='ignore' → won't crash if any column is already missing
-
-
-print("ESG cleaned shape:", esg.shape)
-print("ESG columns after cleaning:", esg.columns.tolist())
-print("\nESG sample:")
-print(esg.head(3))
-
-
-# ============================================================
-# STEP 3: Feature Engineering from Price Data
-# ============================================================
-
-# The price dataset has Date as a column right now
-# We make Date the "index" (like row label) so we can do math easily
-price.set_index('Date', inplace=True)
-
-# ---------------------------------------------------------------
-# DAILY RETURN = how much did the stock change each day?
-# Formula: (today's price - yesterday's price) / yesterday's price
-# pct_change() does this automatically for all 426 companies at once
-# ---------------------------------------------------------------
-daily_returns = price.pct_change()
-
-# ---------------------------------------------------------------
-# Now we compute 3 features for each company using daily_returns
-#
-# avg_return   → what is the average daily growth of this stock?
-#                positive = generally growing, negative = declining
-#
-# volatility   → how much does the price jump around day to day?
-#                high std = very jumpy = risky
-#                low std  = stable = safe
-#
-# momentum_6m  → did the stock go UP or DOWN overall from start to end?
-#                (last price - first price) / first price
-#                positive = upward trend, negative = downward trend
-# ---------------------------------------------------------------
-market_features = pd.DataFrame({
-    'Symbol'      : price.columns,                                              # company ticker names
-    'avg_return'  : daily_returns.mean().values,                                # average daily return
-    'volatility'  : daily_returns.std().values,                                 # how risky/unstable
-    'momentum_6m' : ((price.iloc[-1] - price.iloc[0]) / price.iloc[0]).values  # overall price trend
-})
-
-
-# Quick checks
-print("Market features shape:", market_features.shape)  # should be (426, 4)
-print("\nSample:")
-print(market_features.head(5))
-print("\nAny missing values?")
-print(market_features.isnull().sum())
-
-
-# ============================================================
-# STEP 4: Merge ESG + Market Features
-# ============================================================
-
-# Both datasets have a 'Symbol' column → use it to join them
-# how='inner' means → only keep companies that exist in BOTH datasets
-# (if a company is in ESG but not in price data, it gets dropped)
-df = pd.merge(esg, market_features, on='Symbol', how='inner')
-
-
-print("Merged dataset shape:", df.shape)
-print("\nColumns:", df.columns.tolist())
-print("\nSample:")
-print(df.head(3))
-print("\nAny missing values?")
-print(df.isnull().sum())
-
-
-# ============================================================
-# STEP 5: Create Target Variable (risk_class)
-# ============================================================
-# ============================================================
-# STEP 5: Create Target Variable (risk_class) using ESG + Volatility
-# ============================================================
-
-from sklearn.preprocessing import MinMaxScaler
-
-# --- Normalize volatility and ESG ---
-scaler_mm = MinMaxScaler()
-
-df[['volatility_norm', 'totalEsg_norm']] = scaler_mm.fit_transform(
-    df[['volatility', 'totalEsg']]
-)
-
-# --- Create composite risk score ---
-# Higher volatility → higher risk
-# Higher ESG → lower risk
-df['risk_score'] = (
-    0.6 * df['volatility_norm'] +
-    0.4 * (1 - df['totalEsg_norm'])
-)
-
-
-# Create percentile groups (10 groups = deciles)
-df['percentile_group'] = pd.qcut(df['risk_score'], q=10)
-
-# Calculate min and max for each percentile
-percentile_summary = df.groupby('percentile_group', observed=False)['risk_score'].agg(['min', 'max', 'count'])
-
-# Reset index so it saves nicely in Excel with the 'percentile_group' column
-risk_summary_df = percentile_summary.reset_index()
-
-print("📊 Percentile-wise Risk Score Ranges:")
-print(percentile_summary)
-
-# Convert to percentage scale (0–100)
-df['risk_score_100'] = df['risk_score'] * 100
-
-# Define bins
-bins = list(range(0, 110, 10))  # 0,10,20,...,100
-
-# Create range labels
-labels = [f"{i}-{i+10}" for i in bins[:-1]]
-
-# Categorize into bins
-df['risk_range'] = pd.cut(df['risk_score_100'], bins=bins, labels=labels, include_lowest=True)
-
-# Count how many companies in each range
-range_counts = df['risk_range'].value_counts().sort_index()
-
-print("\n📊 Company Count in Risk Score Ranges (0–100):")
-print(range_counts)
-
-df.drop(columns=['percentile_group', 'risk_range', 'risk_score_100'], inplace=True, errors='ignore')
-
-
-df['risk_class'] = pd.cut(
-    df['risk_score'],
-    bins=[0.0, 0.30, 0.50, 1.0],
-    labels=['Low', 'Medium', 'High']
-)
-
-# --- Debug prints ---
-print("Risk class distribution:")
-print(df['risk_class'].value_counts())
-
-
-print("\nSample (risk_score vs risk_class):")
-print(df[['Symbol', 'risk_score', 'risk_class']].head(10))
-
-# ============================================================
-# VISUALIZATION - Dataset Analysis (Place after Step 5)
-# ============================================================
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-# Set the visual style
-sns.set_theme(style="whitegrid")
-
-# 1. Risk Score Distribution (Histogram)
-# This shows how your 0.6*Vol + 0.4*ESG formula distributed the companies
-plt.figure(figsize=(10, 6))
-sns.histplot(df['risk_score'], bins=20, kde=True, color='skyblue')
-plt.axvline(0.30, color='red', linestyle='--', label='Low-Med Boundary')
-plt.axvline(0.50, color='red', linestyle='--', label='Med-High Boundary')
-plt.title('Distribution of Composite Risk Scores', fontsize=14, fontweight='bold')
-plt.xlabel('Risk Score (0 to 1)')
-plt.ylabel('Number of Companies')
-plt.legend()
-plt.tight_layout()
-plt.show()
-
-# 2. ESG vs. Volatility (Scatter Plot)
-# This shows the "Non-Linear" relationship you want to prove to your instructor
-plt.figure(figsize=(12, 8))
-scatter = sns.scatterplot(
-    data=df, 
-    x='totalEsg', 
-    y='volatility', 
-    hue='GICS Sector', 
-    style='risk_class',
-    palette='viridis',
-    s=100, 
-    alpha=0.7
-)
-plt.title('ESG Performance vs. Stock Volatility by Sector', fontsize=14, fontweight='bold')
-plt.xlabel('Total ESG Score')
-plt.ylabel('Daily Volatility (Std Dev of Returns)')
-plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
-plt.tight_layout()
-plt.show()
-
-
-# ============================================================
-# STEP 6: Preprocessing
-# ============================================================
-
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-
-# --- 6.1 Drop columns not needed for ML ---
-# Symbol → just a name, not a feature
-# volatility → we already used it to CREATE risk_class, 
-#              keeping it as input would be cheating (data leakage!)
-X = df.drop(columns=[
-    'Symbol',
-    'totalEsg',
-    'volatility',
-    'risk_score',
-    'volatility_norm',
-    'totalEsg_norm',
-    'risk_class'
-])
-le = LabelEncoder()
-y = le.fit_transform(df['risk_class'])
-
-print("Features (X) shape:", X.shape)
-print("Target (y) shape:", y.shape)
-print("\nFeature columns:", X.columns.tolist())
-
-# --- 6.2 Encode GICS Sector (text → numbers) ---
-# One-Hot Encoding splits 'GICS Sector' into separate 0/1 columns
-# e.g. 'Health Care' → Health Care=1, all others=0
-X = pd.get_dummies(X, columns=['GICS Sector'])
-
-#print("\nAfter encoding shape:", X.shape)
-
-# --- 6.3 Scale features (important for SVM and KNN) ---
-# StandardScaler makes all numbers on same scale
-# so big numbers (marketCap) don't dominate small ones (beta)
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
-
-print("Scaling done ✅")
-print("Sample scaled values (first row):")
-print(X_scaled[0])
-
-
-# --- STEP 6.4: Save Preprocessed Data to a single Excel file ---
-
-# 1. Define the path for the preprocessed data Excel file
-PREPROCESSED_DATA_PATH = r'F:\ML_PROJECT\results\Preprocessed_Data.xlsx'
-
-# 2. Use ExcelWriter to save multiple sheets
-with pd.ExcelWriter(PREPROCESSED_DATA_PATH, engine='openpyxl') as writer:
-    
-    # Sheet 1: Unscaled Features (X after encoding)
-    X.to_excel(writer, sheet_name='X_Unscaled', index=False)
-    
-    # Sheet 2: Scaled Features (X_scaled converted back to DataFrame)
-    pd.DataFrame(X_scaled, columns=X.columns).to_excel(writer, sheet_name='X_Scaled', index=False)
-    
-    # Sheet 3: Labels (y)
-    pd.DataFrame(y, columns=['target']).to_excel(writer, sheet_name='Y_Label', index=False)
-
-print(f"✅ Preprocessed data saved to one Excel file with 3 sheets: {PREPROCESSED_DATA_PATH}")
-
-# ============================================================
-# STEP 7: Train Test Split
-# ============================================================
-
+from sklearn.preprocessing import MinMaxScaler, StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
-
-# Split data into 80% training and 20% testing
-indices = np.arange(len(df))
-X_train, X_test, y_train, y_test, idx_train, idx_test = train_test_split(
-    X_scaled, y, indices,
-    test_size=0.2,
-    random_state=42,
-    stratify=y
-)
-
-print("X_train shape:", X_train.shape)  # 80% of 426
-print("X_test shape:", X_test.shape)    # 20% of 426
-print("\nTraining class distribution:")
-print(pd.Series(y_train).value_counts())
-print("\nTesting class distribution:")
-print(pd.Series(y_test).value_counts())
-
-
-# ============================================================
-# STEP 8: Train All Models
-# ============================================================
-
+from imblearn.over_sampling import SMOTE
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, ConfusionMatrixDisplay
 
-# --- Define all models in a dictionary ---
-# This way we can loop through all of them instead of repeating code
-models = {
-    'Logistic Regression' : LogisticRegression(max_iter=1000, random_state=42, class_weight='balanced'),
-    'SVM'                 : SVC(random_state=42, class_weight='balanced'),
-    'KNN'                 : KNeighborsClassifier(),
-    'Decision Tree'       : DecisionTreeClassifier(random_state=42, class_weight='balanced'),
-    'Random Forest'       : RandomForestClassifier(
-        n_estimators=200,
-        max_depth=None,
-        random_state=42
-    ),
-    'XGBoost' : XGBClassifier(
-    n_estimators=200,
-    learning_rate=0.1,
-    max_depth=5,
-    random_state=42,
-    eval_metric='mlogloss'
-    )
-}
+# Load datasets
+esg = pd.read_csv("sp500_esg_data.csv")
+price = pd.read_csv("sp500_price_data.csv")
 
-# --- Train and evaluate each model ---
-results = []  # we'll store each model's scores here
-all_confusion_matrices = {}  # NEW: Dictionary to store CMs for each model
+# Standardize Date column
+price['Date'] = pd.to_datetime(price['Date'], utc=True)
+price = price.sort_values('Date').reset_index(drop=True)
 
-for model_name, model in models.items():
+#print(f"✅ Data Ingested. ESG: {esg.shape}, Price: {price.shape}")
+# Set Date as index for math operations
+price.set_index('Date', inplace=True)
 
-    # Train the model on training data
-    model.fit(X_train, y_train)
+# Calculate daily returns for all columns (companies)
+daily_returns = price.pct_change()
 
-    # Predict on test data
-    y_pred = model.predict(X_test)
+# Extract Market Features
+market_features = pd.DataFrame({
+    'Symbol'      : price.columns,
+    'avg_return'  : daily_returns.mean().values,
+    'volatility'  : daily_returns.std().values,
+    'momentum_6m' : ((price.iloc[-1] - price.iloc[0]) / price.iloc[0]).values
+})
 
-    # Calculate scores
-    accuracy  = accuracy_score(y_test, y_pred)
-    precision = precision_score(y_test, y_pred, average='weighted')
-    recall    = recall_score(y_test, y_pred, average='weighted')
-    f1        = f1_score(y_test, y_pred, average='weighted')
+#print("✅ Market signals extracted (Volatility, Momentum, Avg Return).")
+# Merge on Ticker Symbol
+df = pd.merge(esg, market_features, on='Symbol', how='inner')
 
-    # Save results
-    results.append({
-        'Model'     : model_name,
-        'Accuracy'  : round(accuracy, 4),
-        'Precision' : round(precision, 4),
-        'Recall'    : round(recall, 4),
-        'F1 Score'  : round(f1, 4)
-    })
-    
-    cm = confusion_matrix(y_test, y_pred)
-    cm_df = pd.DataFrame(
-        cm, 
-        index=[f'Actual {c}' for c in le.classes_], 
-        columns=[f'Pred {c}' for c in le.classes_]
-    )
-    all_confusion_matrices[model_name] = cm_df # Store it for later
+#print(f"✅ Merge Complete. Unified Dataset Shape: {df.shape}")
+scaler_mm = MinMaxScaler()
 
-    print(f"✅ {model_name} done")
-
-# --- Show comparison table ---
-results_df = pd.DataFrame(results)
-print("\n============================================================")
-print("MODEL COMPARISON TABLE")
-print("============================================================")
-print(results_df.to_string(index=False))
-
-
-# ============================================================
-# STEP 9: Confusion Matrix 
-# ============================================================
-
-import matplotlib.pyplot as plt
-
-# Get predictions from best model
-best_model_name = results_df.sort_values(by='F1 Score', ascending=False).iloc[0]['Model']
-best_model = models[best_model_name]
-
-print("Best model is: ",best_model_name)
-y_pred_best = best_model.predict(X_test)
-
-# --- Create Confusion Matrix ---
-cm = confusion_matrix(y_test, y_pred_best, labels = best_model.classes_)
-
-# --- Display it nicely ---
-disp = ConfusionMatrixDisplay(
-    confusion_matrix=cm,
-    display_labels=best_model.classes_
+# Normalize Volatility and ESG for fair comparison
+df[['volatility_norm', 'totalEsg_norm']] = scaler_mm.fit_transform(
+    df[['volatility', 'totalEsg']]
 )
 
-fig, ax = plt.subplots(figsize=(6, 5))
-disp.plot(ax=ax, colorbar=False, cmap='Blues')
-
-ax.set_title('Confusion Matrix - Random Forest', fontsize=13, fontweight='bold')
-plt.tight_layout()
-#plt.show()
-
-print("Confusion Matrix saved ✅")
-
-# --- Print it as numbers too ---
-print("\nConfusion Matrix (rows=Actual, cols=Predicted):")
-print(pd.DataFrame(
-    cm,
-    index=[f'Actual {c}' for c in le.classes_],
-    columns=[f'Pred {c}' for c in le.classes_]
-))
-
-
-importances = models['Random Forest'].feature_importances_
-
-feature_importance_df = pd.DataFrame({
-    'Feature': X.columns,
-    'Importance': importances
-}).sort_values(by='Importance', ascending=False)
-
-print("\nTop Important Features:")
-print(feature_importance_df.head(10))
-
-
-# ============================================================
-# STEP 11: Save All Outputs to Excel
-# ============================================================
-
-# Path to save excel
-EXCEL_SAVE_PATH = r'F:\ML_PROJECT\results\Final_Results.xlsx'
-
-# --- Prepare final dataset with predictions ---
-
-# Get predictions for ALL data (not just test)
-# This way we can see risk class for every company
-X_all_scaled = scaler.transform(X)
-df['predicted_risk'] = le.inverse_transform(best_model.predict(X_all_scaled))
-
-# --- Prepare model comparison table ---
-results_df = pd.DataFrame(results)
-
-# --- Prepare confusion matrix as dataframe ---
-cm_df = pd.DataFrame(
-    cm,
-    index  =[f'Actual {c}' for c in le.classes_],
-    columns=[f'Pred {c}' for c in le.classes_]
+# Apply weighted risk formula
+df['risk_score'] = (
+    0.6 * df['volatility_norm'] + 
+    0.4 * (1 - df['totalEsg_norm'])
 )
 
-# --- Write all sheets to one Excel file ---
-with pd.ExcelWriter(EXCEL_SAVE_PATH, engine='openpyxl') as writer:
+# Assign Risk Classes
+df['risk_class'] = pd.cut(
+    df['risk_score'],
+    bins=[0.0, 0.30, 0.50, 1.0],
+    labels=['Low', 'Medium', 'High']
+)
 
-    # Sheet 1: Full Dataset
-    df.to_excel(writer, sheet_name='Full Dataset', index=False)
+#print("✅ Risk scoring and labeling finalized.")
+print(df['risk_class'].value_counts())
+# --- 5.1: PRUNING & LEAKAGE PREVENTION ---
+# We remove:
+# 1. Identifiers (Full Name, etc.)
+# 2. Components of the Formula (Volatility, totalEsg) -> To prevent "Cheating"
+# 3. Intermediate Math (risk_score, norms)
+cols_to_drop = [
+    'Full Name', 'GICS Sub-Industry', 'percentile', 'ratingYear', 
+    'ratingMonth', 'overallRisk', 'Symbol', 'totalEsg', 'volatility', 
+    'risk_score', 'volatility_norm', 'totalEsg_norm', 'GICS Sector'
+]
 
-    # Sheet 2: Risk Score Summary (NEW)
-    risk_summary_df.to_excel(writer, sheet_name='Risk Score Analysis', index=False)
+X = df.drop(columns=cols_to_drop + ['risk_class'], errors='ignore')
 
-    # Sheet 3: Market Features
-    market_features.to_excel(writer, sheet_name='Market Features', index=False)
+# --- 5.2: TARGET ENCODING ---
+le = LabelEncoder()
+y = le.fit_transform(df['risk_class'])
 
-    # Sheet 4: Model Comparison
-    results_df.to_excel(writer, sheet_name='Model Comparison', index=False)
+# --- 5.3: ONE-HOT ENCODING (Categorical to Numerical) ---
+#X = pd.get_dummies(X, columns=['GICS Sector'])
 
-    # NEW: Sheets 5 onwards -> One sheet for each Model's Confusion Matrix
-    for model_name, cm_df in all_confusion_matrices.items():
-        # Sheet names have a 31 character limit, so we clean the name slightly
-        sheet_name = f"CM_{model_name}"[:31] 
-        cm_df.to_excel(writer, sheet_name=sheet_name)
+# --- 5.4: FEATURE SCALING (Z-Score) ---
+scaler_std = StandardScaler()
+X_scaled = scaler_std.fit_transform(X)
 
-    # Sheet: Test Predictions (Actual vs Predicted for Best Model)
-    test_results = pd.DataFrame({
-        'Symbol': df.iloc[idx_test]['Symbol'].values,
-        'Actual Risk': le.inverse_transform(y_test),
-        'Predicted Risk': le.inverse_transform(y_pred_best),
-        'Correct': ['✅' if a == p else '❌' for a, p in zip(y_test, y_pred_best)]
-    })
-    test_results.to_excel(writer, sheet_name='Test Predictions', index=False)
+#print("✅ Metadata pruned and ML translation complete.")
+#print(f"Final Feature Set (X) Shape: {X_scaled.shape}")
 
-    # Sheet: Feature Importance
-    feature_importance_df.to_excel(writer, sheet_name='Feature Importance', index=False)
-print("✅ Excel saved →", EXCEL_SAVE_PATH)
-print("\nSheets inside:")
-print("  📄 Full Dataset      → all 426 companies with risk class")
-print("  📄 Market Features   → avg_return, volatility, momentum_6m")
-print("  📄 Model Comparison  → accuracy, F1 of all 6 models")
-print("  📄Excel saved with all Confusion Matrices and Risk Analysis")
-print("  📄 Test Predictions  → company wise correct/wrong prediction")
-print("  📄 Feature Importance → contribution of each feature to the model")
-
-# ============================================================
-# VISUALIZATION - Model Results (Place after Step 11)
-# ============================================================
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from sklearn.mixture import GaussianMixture
+from sklearn.decomposition import PCA # For visualizing high-dimensional data
 
-# 3. Feature Importance Bar Chart (Random Forest)
-# We use Random Forest because it is your "Winner" for Scenario B
-rf_model = models['Random Forest']
-importances = rf_model.feature_importances_
-feature_names = X.columns
+# ... [KEEP STEPS 1-5 FROM YOUR ORIGINAL CODE EXACTLY THE SAME] ...
+# (Data Loading, Market Features, Merging, Scoring, and Scaling)
 
-# Create a DataFrame for plotting
-fi_df = pd.DataFrame({'Feature': feature_names, 'Importance': importances})
-fi_df = fi_df.sort_values(by='Importance', ascending=False).head(10) # Top 10
+# ============================================================
+# STEP 7: Gaussian Mixture Model (Unsupervised)
+# ============================================================
 
-plt.figure(figsize=(10, 6))
-sns.barplot(x='Importance', y='Feature', data=fi_df, palette='magma')
-plt.title('Top 10 Drivers of Corporate Risk (Random Forest)', fontsize=14, fontweight='bold')
-plt.xlabel('Feature Importance Score')
-plt.ylabel('Feature Name')
+# We initialize GMM to look for 3 clusters (to match Low, Med, High)
+# covariance_type='full' allows clusters to be any elliptical shape (very flexible)
+gmm = GaussianMixture(n_components=3, covariance_type='full', random_state=42)
+
+# Fit the model and predict clusters
+# Note: We are NOT using 'y' here. The model doesn't see your labels!
+gmm_clusters = gmm.fit_predict(X_scaled)
+
+# Get the "Soft" probabilities (how sure is GMM about each company?)
+gmm_probs = gmm.predict_proba(X_scaled)
+
+# Add results back to our main dataframe for analysis
+df['gmm_cluster'] = gmm_clusters
+df['cluster_confidence'] = gmm_probs.max(axis=1)
+
+print("✅ GMM Clustering Complete.")
+
+# ============================================================
+# STEP 8: Mapping Clusters to Risk (Comparison)
+# ============================================================
+
+# Since GMM labels are random (0, 1, 2), we find which cluster 
+# has the highest average 'risk_score' to name them logically.
+cluster_map = df.groupby('gmm_cluster')['risk_score'].mean().sort_values().index
+mapping = {cluster_map[0]: 'Cluster_Low', cluster_map[1]: 'Cluster_Medium', cluster_map[2]: 'Cluster_High'}
+df['gmm_label'] = df['gmm_cluster'].map(mapping)
+
+print("\n📊 Cluster Mapping (Based on your Risk Score):")
+for cluster, label in mapping.items():
+    avg_score = df[df['gmm_cluster'] == cluster]['risk_score'].mean()
+    print(f"   {label}: Center Score = {avg_score:.3f}")
+
+# ============================================================
+# STEP 9: The "Overlap" Audit (Crosstab)
+# ============================================================
+# This table shows how many 'Medium' companies the GMM thinks 
+# are actually 'Low' or 'High'.
+comparison = pd.crosstab(df['risk_class'], df['gmm_label'])
+print("\n" + "="*50)
+print("COMPARISON: FORMULA LABELS VS. GMM CLUSTERS")
+print("="*50)
+print(comparison)
+
+# ============================================================
+# STEP 10: Visualizing the Natural Clusters (PCA)
+# ============================================================
+# Since we have many features, we use PCA to squash them into 2D for a plot
+pca = PCA(n_components=2)
+X_pca = pca.fit_transform(X_scaled)
+
+plt.figure(figsize=(12, 8))
+sns.scatterplot(
+    x=X_pca[:, 0], y=X_pca[:, 1], 
+    hue=df['gmm_label'], 
+    size=df['cluster_confidence'],
+    sizes=(20, 200),
+    palette='viridis', 
+    alpha=0.7
+)
+plt.title('GMM Natural Risk Clusters (PCA Projection)', fontsize=14, fontweight='bold')
+plt.xlabel('Principal Component 1 (General Market Factors)')
+plt.ylabel('Principal Component 2 (ESG/Social Factors)')
+plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
 plt.tight_layout()
 plt.show()
 
-# 4. Multi-Model Confusion Matrices
-# This loop generates a plot for EVERY model in your dictionary
-for model_name, model in models.items():
-    # Get predictions for the test set
-    y_pred = model.predict(X_test)
-    cm = confusion_matrix(y_test, y_pred)
-    
-    # Create the plot
-    fig, ax = plt.subplots(figsize=(6, 5))
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=le.classes_)
-    disp.plot(ax=ax, cmap='Blues', colorbar=False)
-    
-    plt.title(f'Confusion Matrix: {model_name}', fontsize=12, fontweight='bold')
-    plt.tight_layout()
-    plt.show()
+# ============================================================
+# STEP 11: Identify the "Confused" Companies
+# ============================================================
+# Find companies where GMM confidence is low (< 60%)
+low_conf = df[df['cluster_confidence'] < 0.60]
+print(f"\n⚠️ Identified {len(low_conf)} companies sitting in the Overlap (Low Confidence).")
+print(low_conf[['Symbol', 'risk_class', 'gmm_label', 'cluster_confidence']].head(10))
 
-print("📊 All result visualizations generated successfully!")
+# Create a temporary dataframe to compare the 126 companies
+# These are companies you called 'Medium' but GMM called 'High'
+audit_df = df[(df['risk_class'] == 'Medium') & (df['gmm_label'] == 'Cluster_High')]
+
+# Companies that 'Stayed' in Medium
+stayed_df = df[(df['risk_class'] == 'Medium') & (df['gmm_label'] == 'Cluster_Medium')]
+
+print("🔎 AUDIT REPORT: Why did 126 Mediums move to High?")
+print("-" * 50)
+
+# Compare the averages of key features
+features_to_check = ['beta', 'socialScore', 'environmentScore', 'marketCap', 'momentum_6m']
+
+comparison_stats = pd.DataFrame({
+    'Stayed_Medium': stayed_df[features_to_check].mean(),
+    'Moved_to_High': audit_df[features_to_check].mean()
+})
+
+comparison_stats['Difference_%'] = ((comparison_stats['Moved_to_High'] - comparison_stats['Stayed_Medium']) / comparison_stats['Stayed_Medium']) * 100
+print(comparison_stats)
+
+# Check if a specific sector dominated the move
+print("\n🏢 Sectors that moved the most to High:")
+print(audit_df['GICS Sector'].value_counts().head(5))
+
+# ============================================================
+# STEP 12: Preparing the New Target (GMM Labels)
+# ============================================================
+
+# We use the labels created by the GMM in the previous step
+le_gmm = LabelEncoder()
+y_gmm = le_gmm.fit_transform(df['gmm_label'])
+
+# Split the data using the NEW labels
+# We still use stratify to keep the cluster proportions balanced
+X_train_g, X_test_g, y_train_g, y_test_g = train_test_split(
+    X_scaled, y_gmm, 
+    test_size=0.2, 
+    random_state=42, 
+    stratify=y_gmm
+)
+
+print(f"✅ Data prepared for GMM Validation. Training on {X_train_g.shape[0]} samples.")
+print(f"Original Training Balance: {pd.Series(y_train_g).value_counts().to_dict()}")
+
+# 7.2: Apply SMOTE (Only to Training Data)
+# This creates synthetic examples for Low and High classes to match Medium.
+sm = SMOTE(random_state=42)
+X_train_res, y_train_res = sm.fit_resample(X_train_g, y_train_g)
+
+print(f"Balanced Training Balance (SMOTE): {pd.Series(y_train_res).value_counts().to_dict()}")
+print(f"Testing set remains untouched: ({X_test_g.shape[0]} samples)")
+
+# ============================================================
+# STEP 13: The Supervised Battle Royale (GMM Edition)
+# ============================================================
+
+models_gmm = {
+    'Logistic Regression': LogisticRegression(max_iter=1000, class_weight='balanced', random_state=42),
+    'SVM': SVC(kernel='rbf', class_weight='balanced', random_state=42),
+    'KNN': KNeighborsClassifier(n_neighbors=5),
+    'Decision Tree': DecisionTreeClassifier(class_weight='balanced', random_state=42),
+    'Random Forest': RandomForestClassifier(n_estimators=200, class_weight='balanced', random_state=42),
+    'XGBoost': XGBClassifier(n_estimators=300, learning_rate=0.1, max_depth=5, random_state=42, eval_metric='mlogloss')
+}
+
+results_gmm = []
+
+for name, model in models_gmm.items():
+    # Train on GMM labels
+    model.fit(X_train_res, y_train_res)
+    
+    # Predict
+    y_pred = model.predict(X_test_g)
+    
+    # Calculate Metrics
+    acc = accuracy_score(y_test_g, y_pred)
+    prec = precision_score(y_test_g, y_pred, average='macro', zero_division=0)
+    rec = recall_score(y_test_g, y_pred, average='macro')
+    f1 = f1_score(y_test_g, y_pred, average='macro')
+    
+    
+    results_gmm.append({
+        'Model': name,
+        'Accuracy': round(acc, 4),
+        'Precision': round(prec, 4),
+        'Recall': round(rec, 4),
+        'F1 Score': round(f1, 4)
+    })
+
+# Convert to DataFrame and sort
+results_gmm_df = pd.DataFrame(results_gmm).sort_values(by='F1 Score', ascending=False)
+
+print("\n" + "="*60)
+print("RESULTS: PREDICTING GMM NATURAL CLUSTERS")
+print("="*60)
+print(results_gmm_df.to_string(index=False))
+
+# ============================================================
+# STEP 14: Final Winner Confusion Matrix
+# ============================================================
+best_gmm_model_name = results_gmm_df.iloc[0]['Model']
+best_gmm_model = models_gmm[best_gmm_model_name]
+
+y_pred_final = best_gmm_model.predict(X_test_g)
+cm_final = confusion_matrix(y_test_g, y_pred_final)
+
+plt.figure(figsize=(8, 6))
+disp = ConfusionMatrixDisplay(confusion_matrix=cm_final, display_labels=le_gmm.classes_)
+disp.plot(cmap='Greens', values_format='d') # Using Green to distinguish from the first run
+plt.title(f'Final Validation: {best_gmm_model_name} on GMM Labels', fontsize=13, fontweight='bold')
+plt.grid(False)
+plt.show()
+# 1. Get the Cluster Counts
+print("📊 FINAL CLUSTER DISTRIBUTION (GMM):")
+print(df['gmm_label'].value_counts())
+print("-" * 30)
+
+# 2. Identify the "Jumpers"
+# We look for companies where your Manual Label != Machine Label
+jumpers = df[df['risk_class'] != df['gmm_label']].copy()
+
+# 3. Calculate the "Why" for each company
+# We compare each jumper's features to the average of their ORIGINAL risk_class
+# to see what made them "stand out" so much that the GMM moved them.
+
+# Calculate means for the original manual classes
+manual_means = df.groupby('risk_class', observed=False)[features_to_check].mean()
+
+def identify_jump_reason(row):
+    original_class = row['risk_class']
+    # Get the average values for that original class
+    avg_vals = manual_means.loc[original_class]
+    
+    # Calculate how many standard deviations the company is away from its original class average
+    # (This is a simplified 'Z-score' to find the biggest outlier factor)
+    differences = {}
+    for feat in features_to_check:
+        diff = abs(row[feat] - avg_vals[feat]) / (df[feat].std() + 1e-6)
+        differences[feat] = diff
+    
+    # The feature with the biggest difference is the "Trigger"
+    trigger_feature = max(differences, key=differences.get)
+    return trigger_feature
+
+# Apply the logic
+jumpers['jump_trigger'] = jumpers.apply(identify_jump_reason, axis=1)
+
+# 4. Display the results for the first 20 jumpers
+#print(f"🚀 Identified {len(jumpers)} companies that 'Jumped' to a new risk category.")
+#print("\nSample Audit Table (First 20 Jumpers):")
+#print(jumpers[['Symbol', 'risk_class', 'gmm_label', 'jump_trigger']].head(20))
+# Get the 'Means' (Centers) of each cluster
+# This is essentially the 'Formula' the GMM used
+cluster_centers = pd.DataFrame(
+    gmm.means_, 
+    columns=X.columns, 
+    index=['Cluster 0', 'Cluster 1', 'Cluster 2']
+)
+
+print("🧬 THE CLUSTER DNA (The machine's internal logic):")
+print("-" * 50)
+print(cluster_centers.T) # Transposed for easier reading
+
+# Get the 'Weights' (How big is each bell curve?)
+for i, weight in enumerate(gmm.weights_):
+    print(f"\nCluster {i} Weight: {weight:.2%}")
